@@ -528,11 +528,7 @@ fn add_return_none(checker: &Checker, stmt: &Stmt, range: TextRange) {
     }
 }
 
-fn has_implicit_return(
-    checker: &Checker,
-    function_def: &ast::StmtFunctionDef,
-    stmt: &Stmt,
-) -> bool {
+fn has_implicit_return(checker: &Checker, function_def: &ast::StmtFunctionDef, stmt: &Stmt) -> bool {
     match stmt {
         Stmt::If(ast::StmtIf {
             body,
