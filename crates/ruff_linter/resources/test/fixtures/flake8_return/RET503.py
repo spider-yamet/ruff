@@ -4,12 +4,14 @@ import os
 import posix
 import sys as std_sys
 import typing
+import unittest
 from posix import abort
 from typing import NoReturn
 
 import _winapi
 import pytest
 import typing_extensions
+from unittest import TestCase
 from pytest import xfail as py_xfail
 
 ###
@@ -65,6 +67,16 @@ def func_no_noreturn(x):
     if x > 0:
         return False
     print("", end="")  # error
+
+
+class NotATestCase:
+    def fail(self) -> None:
+        pass
+
+def local_fail_is_not_noreturn(x):
+    if x > 0:
+        return 1
+    NotATestCase().fail()
 
 
 ###
@@ -267,6 +279,17 @@ def noreturn_pytest_xfail_2():
         return 1
     py_xfail("oof")
 
+class DirectTestCase(TestCase):
+    def maybe_return(self, x: int) -> int:
+        if x > 0:
+            return x
+        self.fail("boom")
+
+class QualifiedTestCase(unittest.TestCase):
+    def maybe_return(self, x: int) -> int:
+        if x > 0:
+            return x
+        self.fail("boom")
 
 def nested(values):
     if not values:

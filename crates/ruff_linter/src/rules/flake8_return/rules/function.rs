@@ -8,7 +8,9 @@ use ruff_python_ast::token::TokenKind;
 use ruff_python_ast::visitor::Visitor;
 use ruff_python_ast::whitespace::indentation;
 use ruff_python_ast::{self as ast, Decorator, ElifElseClause, Expr, Stmt};
+use ruff_python_semantic::ScopeKind;
 use ruff_python_semantic::SemanticModel;
+use ruff_python_semantic::analyze::class::any_qualified_base_class;
 use ruff_python_semantic::analyze::visibility::is_property;
 use ruff_python_trivia::{SimpleTokenKind, SimpleTokenizer, is_python_whitespace};
 use ruff_source_file::LineRanges;
@@ -427,7 +429,7 @@ fn implicit_return_value(checker: &Checker, stack: &Stack) {
 }
 
 /// Return `true` if the `func` appears to be non-returning.
-fn is_noreturn_func(func: &Expr, semantic: &SemanticModel) -> bool {
+fn is_noreturn_func(func: &Expr, function_def: &ast::StmtFunctionDef, semantic: &SemanticModel,) -> bool {
     // First, look for known functions that never return from the standard library and popular
     // libraries.
     if semantic
@@ -443,6 +445,10 @@ fn is_noreturn_func(func: &Expr, semantic: &SemanticModel) -> bool {
             ) || semantic.match_typing_qualified_name(&qualified_name, "assert_never")
         })
     {
+        return true;
+    }
+
+    if is_unittest_test_case_fail_method(func, function_def, semantic) {
         return true;
     }
 
@@ -471,6 +477,43 @@ fn is_noreturn_func(func: &Expr, semantic: &SemanticModel) -> bool {
         || semantic.match_typing_qualified_name(&qualified_name, "Never")
 }
 
+fn is_unittest_test_case_fail_method(func: &Expr, function_def: &ast::StmtFunctionDef, semantic: &SemanticModel) -> bool {
+
+    let Expr::Attribute(ast::ExprAttribute { value, attr, .. }) = func else {
+        return false;
+    };
+    if attr.as_str() != "fail" {
+        return false;
+    }
+
+    let Expr::Name(ast::ExprName { id, .. }) = value.as_ref() else {
+        return false;
+    };
+
+    let Some(first_parameter) = function_def.parameters.iter().next() else {
+        return false;
+    };
+    if id.as_str() != first_parameter.name().as_str() {
+        return false;
+    }
+
+    let Some(class_def) = semantic.current_scopes().find_map(|scope| {
+        let ScopeKind::Class(class_def) = scope.kind else {
+            return None;
+        };
+        Some(class_def)
+    }) else {
+        return false;
+    };
+
+    any_qualified_base_class(class_def, semantic, &|qualified_name| {
+        matches!(
+            qualified_name.segments(),
+            ["unittest", "TestCase"] | ["unittest", "case", "TestCase"]
+        )
+    })
+}
+
 fn add_return_none(checker: &Checker, stmt: &Stmt, range: TextRange) {
     let mut diagnostic = checker.report_diagnostic(ImplicitReturn, range);
     if let Some(indent) = indentation(checker.source(), stmt) {
@@ -485,7 +528,11 @@ fn add_return_none(checker: &Checker, stmt: &Stmt, range: TextRange) {
     }
 }
 
-fn has_implicit_return(checker: &Checker, stmt: &Stmt) -> bool {
+fn has_implicit_return(
+    checker: &Checker,
+    function_def: &ast::StmtFunctionDef,
+    stmt: &Stmt,
+) -> bool {
     match stmt {
         Stmt::If(ast::StmtIf {
             body,
@@ -494,7 +541,7 @@ fn has_implicit_return(checker: &Checker, stmt: &Stmt) -> bool {
         }) => {
             if body
                 .last()
-                .is_some_and(|last| has_implicit_return(checker, last))
+                .is_some_and(|last| has_implicit_return(checker, function_def, last))
             {
                 return true;
             }
@@ -503,7 +550,7 @@ fn has_implicit_return(checker: &Checker, stmt: &Stmt) -> bool {
                 clause
                     .body
                     .last()
-                    .is_some_and(|last| has_implicit_return(checker, last))
+                    .is_some_and(|last| has_implicit_return(checker, function_def, last))
             }) {
                 return true;
             }
@@ -518,7 +565,7 @@ fn has_implicit_return(checker: &Checker, stmt: &Stmt) -> bool {
         Stmt::While(ast::StmtWhile { test, .. }) if is_const_true(test) => false,
         Stmt::For(ast::StmtFor { orelse, .. }) | Stmt::While(ast::StmtWhile { orelse, .. }) => {
             if let Some(last_stmt) = orelse.last() {
-                has_implicit_return(checker, last_stmt)
+                has_implicit_return(checker, function_def, last_stmt)
             } else {
                 true
             }
@@ -526,17 +573,17 @@ fn has_implicit_return(checker: &Checker, stmt: &Stmt) -> bool {
         Stmt::Match(ast::StmtMatch { cases, .. }) => cases.iter().any(|case| {
             case.body
                 .last()
-                .is_some_and(|last| has_implicit_return(checker, last))
+                .is_some_and(|last| has_implicit_return(checker, function_def, last))
         }),
         Stmt::With(ast::StmtWith { body, .. }) => body
             .last()
-            .is_some_and(|last_stmt| has_implicit_return(checker, last_stmt)),
+            .is_some_and(|last_stmt| has_implicit_return(checker, function_def, last_stmt)),
         Stmt::Return(_) | Stmt::Raise(_) | Stmt::Try(_) => false,
         Stmt::Expr(ast::StmtExpr { value, .. })
             if matches!(
                 value.as_ref(),
                 Expr::Call(ast::ExprCall { func, ..  })
-                    if is_noreturn_func(func, checker.semantic())
+                    if is_noreturn_func(func, function_def, checker.semantic())
             ) =>
         {
             false
@@ -547,7 +594,7 @@ fn has_implicit_return(checker: &Checker, stmt: &Stmt) -> bool {
 
 /// RET503
 fn implicit_return(checker: &Checker, function_def: &ast::StmtFunctionDef, stmt: &Stmt) {
-    if has_implicit_return(checker, stmt) {
+    if has_implicit_return(checker, function_def, stmt) {
         add_return_none(checker, stmt, function_def.range());
     }
 }
